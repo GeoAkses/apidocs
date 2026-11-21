@@ -1,0 +1,329 @@
+openapi: 3.0.3
+info:
+  title: GeoAkses Transit API
+  version: 1.0.0
+  description: |
+    REST API read-only untuk koridor, halte, telemetry armada, dan jadwal GeoAkses.
+    Katalog rute mengandung data bersumber; field data_status dan source
+    harus ditampilkan konsumen. Stops, jadwal rinci, atau telemetry dapat kosong
+    jika feed sumber belum tersedia. Data live disertai observed_at dan hanya
+    mengembalikan telemetry yang masih segar. Semua waktu timestamp memakai UTC
+    RFC 3339; jadwal lokal menggunakan WIB.
+  contact:
+    name: GeoAkses
+servers:
+  - url: https://api.geoakses.bandung.go.id
+    description: Host produksi yang direncanakan; belum dikonfirmasi aktif.
+  - url: http://localhost:8080
+    description: Server pengembangan lokal.
+tags:
+  - name: Routes
+  - name: Stops
+  - name: Buses
+  - name: Schedules
+  - name: Health
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Cek kesehatan API dan koneksi MongoDB
+      responses:
+        '200':
+          description: Service siap.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/routes:
+    get:
+      tags: [Routes]
+      summary: Daftar seluruh koridor aktif
+      description: Hanya rute aktif. Hasil selalu array JSON, termasuk saat kosong.
+      parameters:
+        - in: query
+          name: operator
+          schema: { type: string, enum: [TMB, MJT] }
+          description: Filter operator.
+        - in: query
+          name: q
+          schema: { type: string, maxLength: 100 }
+          description: Pencarian case-insensitive pada kode dan nama rute.
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Daftar koridor aktif.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Route' }
+              example:
+                - id: TMB-K1
+                  code: Koridor 1
+                  name: Cibiru - Cibeureum
+                  origin: Cibiru
+                  destination: Cibeureum
+                  operator: TMB
+                  fare: 4000
+                  operating_hours: 05:30-16:30 / 05:30-17:30
+                  headway_minutes: 0
+                  color_hex: '#757575'
+                  stops_count: 0
+                  is_active: true
+                  data_status: official
+                  source: https://uptangkutan-bandung.id/news/trans-metro-bandung
+                  verified_at: '2026-11-22T00:00:00Z'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/routes/{id}:
+    get:
+      tags: [Routes]
+      summary: Detail satu koridor beserta halte
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+          example: TMB-K1
+      responses:
+        '200':
+          description: Koridor aktif dengan halte yang melayani kode koridor.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RouteDetail' }
+              example:
+                id: TMB-K1
+                code: Koridor 1
+                name: Cibiru - Cibeureum
+                origin: Cibiru
+                destination: Cibeureum
+                operator: TMB
+                fare: 4000
+                operating_hours: 05:30-16:30 / 05:30-17:30
+                headway_minutes: 0
+                color_hex: '#757575'
+                stops_count: 0
+                is_active: true
+                data_status: official
+                source: https://uptangkutan-bandung.id/news/trans-metro-bandung
+                verified_at: '2026-11-22T00:00:00Z'
+                stops: []
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/stops:
+    get:
+      tags: [Stops]
+      summary: Daftar halte atau halte terdekat
+      description: |
+        Tanpa lat/lon, mengembalikan daftar halte aktif. Untuk pencarian terdekat,
+        lat dan lon wajib dikirim bersama; radius_m default 5000 dan maksimum 50000.
+        GeoJSON pada MongoDB memakai urutan coordinates [longitude, latitude].
+      parameters:
+        - in: query
+          name: lat
+          schema: { type: number, minimum: -90, maximum: 90 }
+          example: -6.917464
+        - in: query
+          name: lon
+          schema: { type: number, minimum: -180, maximum: 180 }
+          example: 107.619123
+        - in: query
+          name: radius_m
+          schema: { type: number, minimum: 0, exclusiveMinimum: true, maximum: 50000, default: 5000 }
+          description: Radius pencarian, hanya berlaku bila lat/lon dikirim.
+        - in: query
+          name: route_id
+          schema: { type: string }
+          description: ID rute atau kode koridor; dicocokkan ke corridors_served.
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Daftar halte aktif, diurutkan berdasarkan jarak bila lat/lon diberikan.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Stop' }
+              example: []
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/buses/live:
+    get:
+      tags: [Buses]
+      summary: Posisi dan status armada bus aktif
+      description: |
+        Mengembalikan kendaraan aktif yang observed_at-nya tidak lebih lama dari
+        LIVE_FRESH_SECONDS (default backend 120 detik). Respons array kosong berarti
+        belum ada telemetry aktif dan segar.
+      parameters:
+        - in: query
+          name: route_id
+          schema: { type: string }
+          description: Filter opsional berdasarkan ID rute.
+      responses:
+        '200':
+          description: Telemetry segar; array dapat kosong.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Bus' }
+              example: []
+        '500': { $ref: '#/components/responses/InternalError' }
+  /api/v1/schedules:
+    get:
+      tags: [Schedules]
+      summary: Jadwal keberangkatan untuk satu rute
+      parameters:
+        - in: query
+          name: route_id
+          required: true
+          schema: { type: string }
+          example: TMB-K1
+        - in: query
+          name: day_type
+          schema: { type: string, enum: [weekday, weekend, holiday, every_day] }
+          description: Filter tipe hari layanan.
+      responses:
+        '200':
+          description: Jadwal rencana berurutan menurut waktu keberangkatan.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Schedule' }
+              example: []
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalError' }
+components:
+  parameters:
+    Limit:
+      in: query
+      name: limit
+      schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      description: Jumlah maksimum item per halaman.
+    Offset:
+      in: query
+      name: offset
+      schema: { type: integer, minimum: 0, default: 0 }
+      description: Jumlah item yang dilewati.
+  schemas:
+    Route:
+      type: object
+      required: [id, code, name, origin, destination, operator, fare, operating_hours, color_hex, is_active, data_status, source, verified_at]
+      properties:
+        id: { type: string, example: TMB-K1 }
+        code: { type: string, example: Koridor 1 }
+        name: { type: string, example: Cibiru - Cibeureum }
+        origin: { type: string }
+        destination: { type: string }
+        operator: { type: string, enum: [TMB, MJT] }
+        fare: { type: integer, minimum: 0, example: 4000, description: Tarif dasar rupiah; 0 berarti belum ada tarif terverifikasi. Tarif khusus/metode pembayaran dapat berbeda. }
+        operating_hours: { type: string, example: 05:30-16:30 / 05:30-17:30, description: Jam per arah jika sumber menyediakannya; Belum tersedia jika tidak ada sumber. }
+        headway_minutes: { type: integer, minimum: 0 }
+        color_hex: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', example: '#757575', description: Hex warna tampilan; warna netral bila warna resmi koridor belum diketahui. }
+        stops_count: { type: integer, minimum: 0 }
+        is_active: { type: boolean }
+        description: { type: string }
+        data_status: { type: string, enum: [official, mixed, community, verified, stale] }
+        source: { type: string }
+        verified_at: { type: string, format: date-time }
+    RouteDetail:
+      allOf:
+        - { $ref: '#/components/schemas/Route' }
+        - type: object
+          properties:
+            stops:
+              type: array
+              items: { $ref: '#/components/schemas/Stop' }
+    Stop:
+      type: object
+      required: [id, name, latitude, longitude, address, corridors_served, is_shelter, is_active]
+      properties:
+        id: { type: string, example: stop-id-from-source }
+        name: { type: string }
+        latitude: { type: number, format: double, minimum: -90, maximum: 90 }
+        longitude: { type: number, format: double, minimum: -180, maximum: 180 }
+        address: { type: string }
+        corridors_served: { type: string }
+        is_shelter: { type: boolean }
+        is_active: { type: boolean }
+        distance_meters: { type: number, format: double, description: Hanya disertakan pada query terdekat. }
+        data_status: { type: string, enum: [official, mixed, community, verified, stale] }
+        source: { type: string }
+        verified_at: { type: string, format: date-time }
+    Bus:
+      type: object
+      required: [id, plate_number, route_id, route_name, latitude, longitude, speed_kmh, heading, occupancy, eta_minutes, observed_at, is_active, data_status, source]
+      properties:
+        id: { type: string, example: bus-id-from-feed }
+        plate_number: { type: string, description: Identifier publik sesuai izin sumber data. }
+        route_id: { type: string }
+        route_name: { type: string }
+        latitude: { type: number, format: double, minimum: -90, maximum: 90 }
+        longitude: { type: number, format: double, minimum: -180, maximum: 180 }
+        speed_kmh: { type: number, format: double, minimum: 0 }
+        heading: { type: number, format: double, minimum: 0, maximum: 359 }
+        current_stop: { type: string }
+        next_stop: { type: string }
+        occupancy: { type: string, enum: [unknown, empty, seats_available, standing_only, full] }
+        eta_minutes: { type: integer, minimum: 0, nullable: true }
+        observed_at: { type: string, format: date-time }
+        last_updated: { type: integer, format: int64, description: observed_at dalam Unix epoch milliseconds untuk kompatibilitas client Android. }
+        is_active: { type: boolean }
+        data_status: { type: string, enum: [official, mixed, community, verified, stale] }
+        source: { type: string }
+    Schedule:
+      type: object
+      required: [id, route_id, stop_name, departure_time, day_type, is_realtime, is_active]
+      properties:
+        id: { type: string }
+        route_id: { type: string }
+        stop_id: { type: string }
+        stop_name: { type: string }
+        departure_time: { type: string, pattern: '^([01]\d|2[0-3]):[0-5]\d$', example: '05:30', description: Jadwal lokal WIB, bukan ETA realtime. }
+        estimated_arrival: { type: string, example: '06:10' }
+        day_type: { type: string, enum: [weekday, weekend, holiday, every_day] }
+        is_realtime: { type: boolean, example: false }
+        is_active: { type: boolean }
+        data_status: { type: string, enum: [official, mixed, community, verified, stale] }
+        source: { type: string }
+        verified_at: { type: string, format: date-time }
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: invalid_coordinates }
+        message: { type: string, example: lat and lon must be valid geographic coordinates }
+        request_id: { type: string }
+  responses:
+    BadRequest:
+      description: Parameter tidak valid atau parameter wajib tidak dikirim.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: invalid_coordinates, message: 'lat and lon must be provided together' }
+    NotFound:
+      description: Resource tidak ditemukan atau tidak aktif.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: route_not_found, message: Route was not found }
+    InternalError:
+      description: Kesalahan internal; detail implementasi tidak disertakan.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: internal_error, message: An internal error occurred }
+    ServiceUnavailable:
+      description: Database tidak tersedia.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: database_unavailable, message: Database is unavailable }
